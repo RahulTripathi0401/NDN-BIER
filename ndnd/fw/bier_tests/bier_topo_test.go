@@ -1,4 +1,4 @@
-package fw
+package bier_tests
 
 // Topology-level BIER simulation tests.
 //
@@ -9,7 +9,7 @@ package fw
 //   - Loop suppression prevents infinite forwarding
 //   - Scale: up to 256 routers
 //
-// Each test creates per-router BiftState objects and runs the BIER algorithm
+// Each test creates per-router fw.BiftState objects and runs the BIER algorithm
 // directly (without the global Bift or processBierInterest), allowing full
 // multi-router simulation in a single test process.
 
@@ -19,6 +19,7 @@ import (
 	"sort"
 	"testing"
 
+	fw "github.com/named-data/ndnd/fw/fw"
 	enc "github.com/named-data/ndnd/std/encoding"
 )
 
@@ -30,17 +31,17 @@ import (
 type topo struct {
 	n    int
 	adj  [][]int      // undirected adjacency list
-	bift []*BiftState // per-router BIFT (index == router ID == BFR-ID)
+	bift []*fw.BiftState // per-router BIFT (index == router ID == BFR-ID)
 }
 
 func newTopo(n int) *topo {
 	t := &topo{
 		n:    n,
 		adj:  make([][]int, n),
-		bift: make([]*BiftState, n),
+		bift: make([]*fw.BiftState, n),
 	}
 	for i := range t.bift {
-		t.bift[i] = &BiftState{}
+		t.bift[i] = &fw.BiftState{}
 	}
 	return t
 }
@@ -88,7 +89,7 @@ func (t *topo) buildBifts() {
 			b.RegisterRouter(name, dst)
 			if nh[dst] >= 0 {
 				// Offset face IDs by 1: NextHop=0 is the "unset" sentinel in
-				// BiftState, so router 0 as a direct neighbour must map to face 1.
+				// fw.BiftState, so router 0 as a direct neighbour must map to face 1.
 				b.UpdateNextHop(dst, uint64(nh[dst]+1))
 			}
 		}
@@ -100,7 +101,7 @@ func (t *topo) buildBifts() {
 func (t *topo) buildBitstring(ids ...int) []byte {
 	var bs []byte
 	for _, id := range ids {
-		bs = BierSetBit(bs, id)
+		bs = fw.BierSetBit(bs, id)
 	}
 	return bs
 }
@@ -127,7 +128,7 @@ func (t *topo) simulate(srcRouter int, bs []byte) topoSimResult {
 		hopCount int
 	}
 
-	queue := []item{{srcRouter, BierClone(bs), -1, 0}}
+	queue := []item{{srcRouter, fw.BierClone(bs), -1, 0}}
 	// visited prevents processing the same (router, bitstring) state twice.
 	visited := make(map[string]bool)
 
@@ -141,18 +142,18 @@ func (t *topo) simulate(srcRouter int, bs []byte) topoSimResult {
 		}
 		visited[key] = true
 
-		remaining := BierClone(cur.bs)
+		remaining := fw.BierClone(cur.bs)
 
 		// BFER check: local bit
-		if BierGetBit(remaining, cur.router) {
+		if fw.BierGetBit(remaining, cur.router) {
 			res.delivered[cur.router] = true
 			if _, seen := res.hopCounts[cur.router]; !seen {
 				res.hopCounts[cur.router] = cur.hopCount
 			}
-			BierClearBit(remaining, cur.router)
+			fw.BierClearBit(remaining, cur.router)
 		}
 
-		if BierIsZero(remaining) {
+		if fw.BierIsZero(remaining) {
 			continue
 		}
 
@@ -163,13 +164,13 @@ func (t *topo) simulate(srcRouter int, bs []byte) topoSimResult {
 			if nbID == cur.inFace {
 				continue
 			}
-			mask := BierAnd(remaining, nb.Fbm)
-			if BierIsZero(mask) {
+			mask := fw.BierAnd(remaining, nb.Fbm)
+			if fw.BierIsZero(mask) {
 				continue
 			}
 			res.packetsSent++
 			queue = append(queue, item{nbID, mask, cur.router, cur.hopCount + 1})
-			remaining = BierAndNot(remaining, nb.Fbm)
+			remaining = fw.BierAndNot(remaining, nb.Fbm)
 		}
 	}
 	return res

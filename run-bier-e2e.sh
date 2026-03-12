@@ -85,7 +85,7 @@ run bash -lc "cd '${NDND_DIR}' && go build -v ./..."
 
 if [[ "${RUN_UNIT_TESTS}" -eq 1 ]]; then
   echo "=== Stage 2: Run ndnd unit tests ==="
-  run bash -lc "cd '${NDND_DIR}' && go test -v ./fw/fw -run TestBier"
+  run bash -lc "cd '${NDND_DIR}' && go test -v ./fw/bier_tests -run TestBier"
 fi
 
 if [[ "${RUN_INSTALL}" -eq 1 ]]; then
