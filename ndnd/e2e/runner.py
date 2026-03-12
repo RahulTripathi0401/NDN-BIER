@@ -1,0 +1,59 @@
+import os
+import random
+import subprocess
+import time
+from pathlib import Path
+from types import FunctionType
+
+from mininet.log import setLogLevel, info
+from minindn.minindn import Minindn
+
+import test_005
+import test_006
+import test_007
+
+
+def ensure_local_binaries() -> None:
+    """Build ndnd and svs-chat into .bin/ (or use pre-built if `go` is a no-op shim)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    local_bin = repo_root / ".bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+
+    for name, pkg in [("ndnd", "./cmd/ndnd"), ("svs-chat", "./cmd/svs-chat")]:
+        subprocess.check_call(["go", "build", "-o", str(local_bin / name), pkg], cwd=repo_root)
+
+    os.environ["PATH"] = f"{local_bin}:{os.environ.get('PATH', '')}"
+
+
+def run(name: str, scenario: FunctionType, **kwargs) -> None:
+    info(f"\n{'='*60}\n  SCENARIO: {name}\n{'='*60}\n")
+    start = time.time()
+    try:
+        random.seed(0)
+        scenario(ndn, **kwargs)
+        elapsed = time.time() - start
+        info(f"{'='*60}\n  PASSED: {name}  ({elapsed:.1f}s)\n{'='*60}\n\n")
+    except Exception as e:
+        ndn.stop()
+        raise
+    finally:
+        for cleanup in reversed(ndn.cleanups):
+            cleanup()
+        os.system('pkill -9 ndnd 2>/dev/null; pkill -9 nfd 2>/dev/null; true')
+
+
+if __name__ == '__main__':
+    setLogLevel('info')
+
+    ensure_local_binaries()
+    Minindn.cleanUp()
+    Minindn.verifyDependencies()
+
+    ndn = Minindn()
+    ndn.start()
+
+    run("test_005: BIER file transfer multicast (52 nodes)", test_005.scenario)
+    run("test_006: BIER multi-group multicast",              test_006.scenario)
+    run("test_007: BIER SVS Chat (alo-latest, PIT-tandem)",  test_007.scenario)
+
+    ndn.stop()
