@@ -2,10 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NDN_CXX_DIR="${ROOT_DIR}/ndn-cxx"
-NFD_DIR="${ROOT_DIR}/NFD"
+NDND_DIR="${ROOT_DIR}/ndnd"
 MINI_NDN_DIR="${ROOT_DIR}/mini-ndn"
-MINI_NDN_SCENARIO="${MINI_NDN_DIR}/examples/bier_multicast_experiment.py"
 OS_NAME="$(uname -s)"
 
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
@@ -15,20 +13,20 @@ RUN_INSTALL=1
 RUN_UNIT_TESTS=1
 
 usage() {
-  cat <<'EOF'
+  cat <<'INNER_EOF'
 Usage: ./run-bier-e2e.sh [options]
 
 Options:
-  --no-install         Build/test only (skip sudo waf install)
-  --no-unit-tests      Build/install only (skip unit test binaries)
+  --no-install         Build/test only (skip sudo install)
+  --no-unit-tests      Build/install only (skip unit tests)
   --no-minindn         Skip Mini-NDN scenario run
   -j, --jobs <N>       Parallel build jobs (default: auto)
   -h, --help           Show this help
 
 Environment variables:
   JOBS=<N>             Same as --jobs
-  BUILD_TYPE=debug     or release; passed to waf configure
-EOF
+  BUILD_TYPE=debug     or release; controls build optimizations
+INNER_EOF
 }
 
 require_cmd() {
@@ -42,19 +40,6 @@ run() {
   echo
   echo ">>> $*"
   "$@"
-}
-
-append_path() {
-  local value="$1"
-  local current="${!2:-}"
-  if [[ -z "${value}" ]]; then
-    return
-  fi
-  if [[ -z "${current}" ]]; then
-    printf -v "$2" '%s' "${value}"
-  else
-    printf -v "$2" '%s:%s' "${value}" "${current}"
-  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -88,90 +73,53 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd python3
-require_cmd pkg-config
-require_cmd clang++
+require_cmd go
 
-if [[ ! -d "${NDN_CXX_DIR}" || ! -d "${NFD_DIR}" || ! -d "${MINI_NDN_DIR}" ]]; then
-  echo "ERROR: expected ndn-cxx, NFD, mini-ndn under ${ROOT_DIR}"
+if [[ ! -d "${NDND_DIR}" || ! -d "${MINI_NDN_DIR}" ]]; then
+  echo "ERROR: expected ndnd, mini-ndn under ${ROOT_DIR}"
   exit 1
 fi
 
-WAF_BUILD_FLAGS=()
-if [[ "${BUILD_TYPE}" == "debug" ]]; then
-  WAF_BUILD_FLAGS+=(--debug)
+echo "=== Stage 1: Build ndnd (Go) ==="
+run bash -lc "cd '${NDND_DIR}' && go build -v ./..."
+
+if [[ "${RUN_UNIT_TESTS}" -eq 1 ]]; then
+  echo "=== Stage 2: Run ndnd unit tests ==="
+  run bash -lc "cd '${NDND_DIR}' && go test -v ./fw/fw -run TestBier"
 fi
 
-if [[ "${OS_NAME}" == "Darwin" ]]; then
-  if command -v brew >/dev/null 2>&1 && [[ -d "$(brew --prefix boost 2>/dev/null || true)" ]]; then
-    BOOST_PREFIX="$(brew --prefix boost)"
-    WAF_BUILD_FLAGS+=(--boost-includes="${BOOST_PREFIX}/include" --boost-libs="${BOOST_PREFIX}/lib")
-  fi
-  # Boost 1.90 headers trigger -Wextra-semi under strict -Werror builds with clang.
-  export CXXFLAGS="${CXXFLAGS:-} -Wno-error=extra-semi -Wno-extra-semi"
-fi
-
-append_path "/usr/local/lib/pkgconfig" PKG_CONFIG_PATH
-append_path "/opt/homebrew/lib/pkgconfig" PKG_CONFIG_PATH
-append_path "/opt/local/lib/pkgconfig" PKG_CONFIG_PATH
-export PKG_CONFIG_PATH
-
-echo "=== Stage 1: Build ndn-cxx ==="
-run bash -lc "cd '${NDN_CXX_DIR}' && ./waf configure --with-tests ${WAF_BUILD_FLAGS[*]}"
-run bash -lc "cd '${NDN_CXX_DIR}' && ./waf -j${JOBS}"
 if [[ "${RUN_INSTALL}" -eq 1 ]]; then
+  echo "=== Stage 3: Install ndnd ==="
   require_cmd sudo
-  run bash -lc "cd '${NDN_CXX_DIR}' && sudo ./waf install"
-  if [[ "${OS_NAME}" == "Linux" ]]; then
-    run sudo ldconfig
-  fi
-fi
-if [[ "${RUN_UNIT_TESTS}" -eq 1 ]]; then
-  if [[ "${RUN_INSTALL}" -eq 1 ]]; then
-    run bash -lc "cd '${NDN_CXX_DIR}' && ./build/unit-tests -t 'Lp/TestPacket/EncodeDecodeBierBitString'"
-    run bash -lc "cd '${NDN_CXX_DIR}' && ./build/unit-tests -t 'TestFace/ExpressInterest/InterestTagRoundtrip'"
+  if [ ! -f "${NDND_DIR}/.bin/ndnd" ]; then
+    echo ">>> bash -lc cd '${NDND_DIR}' && go build -v -o /usr/local/bin/ndnd ./cmd/ndnd"
+    run bash -lc "cd '${NDND_DIR}' && sudo env PATH=\"\$PATH\" go build -v -o /usr/local/bin/ndnd ./cmd/ndnd"
+    run bash -lc "cd '${NDND_DIR}' && sudo env PATH=\"\$PATH\" go build -v -o /usr/local/bin/svs-chat ./cmd/svs-chat/main.go"
   else
-    run bash -lc "cd '${NDN_CXX_DIR}' && DYLD_LIBRARY_PATH='${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests -t 'Lp/TestPacket/EncodeDecodeBierBitString'"
-    run bash -lc "cd '${NDN_CXX_DIR}' && DYLD_LIBRARY_PATH='${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests -t 'TestFace/ExpressInterest/InterestTagRoundtrip'"
+    echo "Skipping Go build (pre-built binary present)"
+    run bash -lc "sudo cp '${NDND_DIR}/.bin/ndnd' /usr/local/bin/ndnd"
+    if [ -f "${NDND_DIR}/.bin/svs-chat" ]; then
+      run bash -lc "sudo cp '${NDND_DIR}/.bin/svs-chat' /usr/local/bin/svs-chat"
+    fi
   fi
-fi
-
-echo "=== Stage 2: Build NFD ==="
-run bash -lc "cd '${NFD_DIR}' && ./waf configure --with-tests ${WAF_BUILD_FLAGS[*]}"
-run bash -lc "cd '${NFD_DIR}' && ./waf -j${JOBS}"
-if [[ "${RUN_INSTALL}" -eq 1 ]]; then
-  run bash -lc "cd '${NFD_DIR}' && sudo ./waf install"
-  if [[ "${OS_NAME}" == "Linux" ]]; then
-    run sudo ldconfig
-  fi
-fi
-if [[ "${RUN_UNIT_TESTS}" -eq 1 ]]; then
-  if [[ "${RUN_INSTALL}" -eq 1 ]]; then
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierReplicationPrePit'"
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierLocalFallbackToNdnPipeline'"
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierRuntimeControlInterests'"
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Fw/TestForwarder/ProcessConfig/BierConfig'"
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Face/TestGenericLinkService/LpFields/SendBierBitStringInterest'"
-    run bash -lc "cd '${NFD_DIR}' && ./build/unit-tests-daemon -t 'Face/TestGenericLinkService/LpFields/ReceiveBierBitStringInterest'"
-  else
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierReplicationPrePit'"
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierLocalFallbackToNdnPipeline'"
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Fw/TestForwarder/BierRuntimeControlInterests'"
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Fw/TestForwarder/ProcessConfig/BierConfig'"
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Face/TestGenericLinkService/LpFields/SendBierBitStringInterest'"
-    run bash -lc "cd '${NFD_DIR}' && DYLD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${DYLD_LIBRARY_PATH:-}' LD_LIBRARY_PATH='${NFD_DIR}/build:${NDN_CXX_DIR}/build:\${LD_LIBRARY_PATH:-}' ./build/unit-tests-daemon -t 'Face/TestGenericLinkService/LpFields/ReceiveBierBitStringInterest'"
-  fi
+  echo "ndnd and svs-chat installed to /usr/local/bin/"
 fi
 
 if [[ "${RUN_MININDN}" -eq 1 ]]; then
-  echo "=== Stage 3: Mini-NDN BIER experiment ==="
+  echo "=== Stage 4: Mini-NDN BIER experiment ==="
   if [[ "${OS_NAME}" != "Linux" ]]; then
     echo "WARNING: Mini-NDN runtime is Linux-centric; skipping scenario on ${OS_NAME}."
-    echo "         Run this stage on Linux:"
-    echo "         sudo -E python3 '${MINI_NDN_SCENARIO}'"
+    echo "         Run this script inside a Linux container or VM."
   else
-    run python3 -m py_compile "${MINI_NDN_SCENARIO}"
     run bash -lc "cd '${MINI_NDN_DIR}' && ./install.sh --source --use-existing -y"
-    run sudo -E python3 "${MINI_NDN_SCENARIO}"
+    run bash -lc "cd '${NDND_DIR}' && sudo env PATH=\"\$PATH\" make e2e"
+    
+    echo "=== Extracting Logs ==="
+    mkdir -p "${ROOT_DIR}/logs"
+    sudo cp -r /tmp/minindn "${ROOT_DIR}/logs/" 2>/dev/null || true
+    sudo cp /tmp/bier-*.log "${ROOT_DIR}/logs/" 2>/dev/null || true
+    sudo chown -R 1000:1000 "${ROOT_DIR}/logs/" 2>/dev/null || true
+    echo "Logs saved to ${ROOT_DIR}/logs"
   fi
 fi
 
