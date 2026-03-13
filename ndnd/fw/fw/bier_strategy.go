@@ -19,12 +19,13 @@
 package fw
 
 import (
-	"sort"
+	"time"
 
 	"github.com/named-data/ndnd/fw/core"
 	"github.com/named-data/ndnd/fw/defn"
 	"github.com/named-data/ndnd/fw/table"
 	enc "github.com/named-data/ndnd/std/encoding"
+	ndnlog "github.com/named-data/ndnd/std/log"
 )
 
 // BierStrategyName is the canonical name of the BIER strategy.
@@ -81,26 +82,39 @@ func (s *BierStrategy) AfterReceiveInterest(
 		s.replicateBier(packet, pitEntry, inFace)
 		return
 	}
-	// No BIER bit-string: fall back to best-route forwarding
+	// No BIER bit-string: fall back to multicast (flood to all nexthops)
 	if len(nexthops) == 0 {
 		core.Log.Debug(s, "No nexthop for Interest", "name", packet.Name)
 		return
 	}
-	sort.Slice(nexthops, func(i, j int) bool { return nexthops[i].Cost < nexthops[j].Cost })
-	if len(nextER) > 0 {
-		packet.EgressRouter = nextER[0]
+
+	// Suppress retransmissions within the suppression interval (different nonce)
+	now := time.Now()
+	for _, outRecord := range pitEntry.OutRecords() {
+		if outRecord.LatestNonce != packet.L3.Interest.NonceV.Unwrap() &&
+			outRecord.LatestTimestamp.Add(MulticastSuppressionTime).After(now) {
+			core.Log.Debug(s, "Suppressed Interest", "name", packet.Name)
+			return
+		}
 	}
-	s.SendInterest(packet, pitEntry, nexthops[0].Nexthop, inFace)
+
+	for _, nexthop := range nexthops {
+		core.Log.Trace(s, "Forwarding Interest", "name", packet.Name, "faceid", nexthop.Nexthop)
+		s.SendInterest(packet, pitEntry, nexthop.Nexthop, inFace)
+	}
 }
 
-// replicateBier performs BIFT-based BIER replication through the PIT.
+// bierReplicate performs BIFT-based BIER replication through the PIT.
 // Local bit is cleared first (local delivery already done by thread.go's
 // allowedLocalNexthops block). Remaining bits are replicated to BIFT
-// neighbors using SendInterest, which creates PIT out-records.
-func (s *BierStrategy) replicateBier(
+// neighbors using sendInterest, which creates PIT out-records.
+// Shared by BierStrategy and Multicast so both strategies are BIER-aware.
+func bierReplicate(
+	logCtx ndnlog.Tag,
 	packet *defn.Pkt,
 	pitEntry table.PitEntry,
 	inFace uint64,
+	sendInterest func(*defn.Pkt, table.PitEntry, uint64, uint64) bool,
 ) {
 	incomingBs := BierClone(packet.Bier)
 
@@ -118,7 +132,7 @@ func (s *BierStrategy) replicateBier(
 		return
 	}
 
-	core.Log.Trace(s, "BIER replication", "name", packet.Name, "bs-len", len(incomingBs))
+	core.Log.Trace(logCtx, "BIER replication", "name", packet.Name, "bs-len", len(incomingBs))
 
 	neighbors := Bift.GetNeighborEntries()
 	for _, neighbor := range neighbors {
@@ -141,10 +155,10 @@ func (s *BierStrategy) replicateBier(
 			Bier:           replicationMask,
 		}
 
-		core.Log.Trace(s, "BIER: replicating to neighbor", "name", packet.Name, "faceid", neighbor.FaceID)
+		core.Log.Trace(logCtx, "BIER: replicating to neighbor", "name", packet.Name, "faceid", neighbor.FaceID)
 
 		// KEY: SendInterest creates PIT out-record — Data return path is tracked
-		s.SendInterest(clonePkt, pitEntry, neighbor.FaceID, inFace)
+		sendInterest(clonePkt, pitEntry, neighbor.FaceID, inFace)
 
 		// Loop suppression: clear forwarded bits from working mask
 		incomingBs = BierAndNot(incomingBs, neighbor.Fbm)
@@ -152,6 +166,10 @@ func (s *BierStrategy) replicateBier(
 			break
 		}
 	}
+}
+
+func (s *BierStrategy) replicateBier(packet *defn.Pkt, pitEntry table.PitEntry, inFace uint64) {
+	bierReplicate(s, packet, pitEntry, inFace, s.SendInterest)
 }
 
 func (s *BierStrategy) BeforeSatisfyInterest(pitEntry table.PitEntry, inFace uint64) {}
